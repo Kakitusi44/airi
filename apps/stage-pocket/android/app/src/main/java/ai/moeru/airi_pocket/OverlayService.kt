@@ -1,156 +1,126 @@
 package ai.moeru.airi_pocket
 
-  import android.app.Notification
-  import android.app.NotificationChannel
-  import android.app.NotificationManager
-  import android.app.PendingIntent
-  import android.app.Service
-  import android.content.Context
-  import android.content.Intent
   import android.graphics.Color
-  import android.graphics.PixelFormat
-  import android.os.Build
-  import android.os.IBinder
-  import android.view.Gravity
-  import android.view.MotionEvent
-  import android.view.View
-  import android.view.WindowManager
-  import android.webkit.WebSettings
+  import android.net.Uri
+  import android.net.http.SslError
+  import android.webkit.SslErrorHandler
   import android.webkit.WebView
-  import android.webkit.WebViewClient
-  import android.widget.FrameLayout
-  import androidx.core.app.NotificationCompat
+  import com.getcapacitor.Bridge
+  import com.getcapacitor.BridgeActivity
+  import com.getcapacitor.BridgeWebViewClient
+  import com.getcapacitor.Logger
+  import org.json.JSONObject
+  import ai.moeru.airi_pocket.websocket.HostWebSocketBridge
+  import ai.moeru.airi_pocket.websocket.HostWebSocketEvent
+  import ai.moeru.airi_pocket.websocket.HostWebSocketSession
+  import ai.moeru.airi_pocket.websocket.OkHttpHostWebSocketSessionFactory
+  import ai.moeru.airi_pocket.websocket.WebSocketBridgeJavascriptInterface
+  import ai.moeru.airi_pocket.websocket.createHostWebSocketClient
 
-  class OverlayService : Service() {
-      private var windowManager: WindowManager? = null
-      private var overlayContainer: View? = null
-
+  class MainActivity : BridgeActivity() {
       companion object {
-          const val CHANNEL_ID = "airi_overlay_channel"
-          const val NOTIFICATION_ID = 1001
-          const val EXTRA_URL = "overlay_url"
-          const val ACTION_STOP = "ai.moeru.airi_pocket.STOP_OVERLAY"
+          internal var webSocketSessionFactoryOverrideForTesting:
+              ((String, (HostWebSocketEvent) -> Unit) -> HostWebSocketSession)? = null
       }
 
-      override fun onBind(intent: Intent?): IBinder? = null
+      private val webSocketBridgeClient = createHostWebSocketClient()
+      private var webSocketBridge: HostWebSocketBridge? = null
 
-      override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-          if (intent?.action == ACTION_STOP) {
-              stopSelf()
-              return START_NOT_STICKY
-          }
-          if (overlayContainer == null) {
-              val url = intent?.getStringExtra(EXTRA_URL) ?: "https://airi.moeru.ai"
-              showOverlay(url)
-          }
-          return START_STICKY
-      }
+      override fun load() {
+          registerPlugin(MicrophonePermissionPlugin::class.java)
+          registerPlugin(WebAuthenticationPlugin::class.java)
+          registerPlugin(OverlayPlugin::class.java)
+          super.load()
 
-      override fun onCreate() {
-          super.onCreate()
-          createNotificationChannel()
-          startForeground(NOTIFICATION_ID, buildNotification())
-      }
+          val bridge = bridge ?: return
+          bridge.webView.setBackgroundColor(Color.TRANSPARENT)
+          installWebSocketBridge(bridge)
 
-      private fun showOverlay(url: String) {
-          windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-
-          val params = WindowManager.LayoutParams(
-              dpToPx(220),
-              dpToPx(300),
-              WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-              WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-              PixelFormat.TRANSLUCENT
-          ).apply {
-              gravity = Gravity.TOP or Gravity.END
-              x = dpToPx(8)
-              y = dpToPx(120)
+          if (!bridge.isDevMode) {
+              return
           }
 
-          val container = FrameLayout(this)
-
-          val webView = WebView(this).apply {
-              settings.apply {
-                  javaScriptEnabled = true
-                  domStorageEnabled = true
-                  mediaPlaybackRequiresUserGesture = false
-                  cacheMode = WebSettings.LOAD_DEFAULT
-              }
-              setBackgroundColor(Color.TRANSPARENT)
-              webViewClient = WebViewClient()
-              loadUrl(url)
-          }
-
-          // Semi-transparent strip at top — drag it to move the overlay window
-          val dragHandle = View(this).apply {
-              setBackgroundColor(Color.argb(80, 0, 0, 0))
-          }
-
-          container.addView(webView, FrameLayout.LayoutParams(
-              FrameLayout.LayoutParams.MATCH_PARENT,
-              FrameLayout.LayoutParams.MATCH_PARENT
-          ))
-          container.addView(dragHandle, FrameLayout.LayoutParams(
-              FrameLayout.LayoutParams.MATCH_PARENT,
-              dpToPx(22)
-          ).apply { gravity = Gravity.TOP })
-
-          var initX = 0; var initY = 0
-          var touchX = 0f; var touchY = 0f
-
-          dragHandle.setOnTouchListener { _, event ->
-              when (event.action) {
-                  MotionEvent.ACTION_DOWN -> {
-                      initX = params.x; initY = params.y
-                      touchX = event.rawX; touchY = event.rawY
-                      true
-                  }
-                  MotionEvent.ACTION_MOVE -> {
-                      params.x = initX + (event.rawX - touchX).toInt()
-                      params.y = initY + (event.rawY - touchY).toInt()
-                      windowManager?.updateViewLayout(container, params)
-                      true
-                  }
-                  else -> false
-              }
-          }
-
-          overlayContainer = container
-          windowManager!!.addView(container, params)
+          bridge.setWebViewClient(DebugTlsBypassWebViewClient(bridge))
       }
 
       override fun onDestroy() {
-          overlayContainer?.let { windowManager?.removeView(it) }
-          overlayContainer = null
+          webSocketBridge?.dispose()
           super.onDestroy()
       }
 
-      private fun createNotificationChannel() {
-          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-              val channel = NotificationChannel(
-                  CHANNEL_ID, "AIRI Overlay", NotificationManager.IMPORTANCE_LOW
-              ).apply { description = "AIRI character floating overlay" }
+      internal fun evaluateJavascriptForTesting(
+          script: String,
+          callback: (String?) -> Unit,
+      ) {
+          bridge?.webView?.let { webView ->
+              webView.post {
+                  webView.evaluateJavascript(script, callback)
+              }
+          } ?: callback(null)
+      }
 
-  getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+      private fun installWebSocketBridge(bridge: Bridge) {
+          val hostWebSocketBridge = HostWebSocketBridge(
+              sessionFactory = webSocketSessionFactoryOverrideForTesting
+                  ?: OkHttpHostWebSocketSessionFactory(webSocketBridgeClient)::create,
+              eventSink = ::dispatchWebSocketBridgeEvent,
+          )
+          webSocketBridge = hostWebSocketBridge
+
+          bridge.webView.addJavascriptInterface(
+              WebSocketBridgeJavascriptInterface(hostWebSocketBridge),
+              "AiriHostBridge",
+          )
+      }
+
+      private fun dispatchWebSocketBridgeEvent(payload: String) {
+          val webView = bridge?.webView ?: return
+          val script = "window.__airiHostBridge?.onNativeMessage(" +
+              JSONObject.quote(payload) + ")"
+          webView.post {
+              webView.evaluateJavascript(script, null)
           }
       }
 
-      private fun buildNotification(): Notification {
-          val stopIntent = PendingIntent.getService(
-              this, 0,
-              Intent(this, OverlayService::class.java).apply { action = ACTION_STOP },
-              PendingIntent.FLAG_IMMUTABLE
-          )
-          return NotificationCompat.Builder(this, CHANNEL_ID)
-              .setContentTitle("AIRI is active")
-              .setContentText("Character is displayed over other apps")
-              .setSmallIcon(android.R.drawable.ic_dialog_info)
-              .setPriority(NotificationCompat.PRIORITY_LOW)
-              .setOngoing(true)
-              .addAction(0, "Hide", stopIntent)
-              .build()
-      }
+      private class DebugTlsBypassWebViewClient(
+          private val bridge: Bridge,
+      ) : BridgeWebViewClient(bridge) {
 
-      private fun dpToPx(dp: Int): Int =
-          (dp * resources.displayMetrics.density).toInt()
+          override fun onReceivedSslError(
+              view: WebView,
+              handler: SslErrorHandler,
+              error: SslError,
+          ) {
+              if (shouldBypassDevServerCertificate(error)) {
+                  Logger.warn("Bypassing dev server cert: " + error.url)
+                  handler.proceed()
+                  return
+              }
+              super.onReceivedSslError(view, handler, error)
+          }
+
+          private fun shouldBypassDevServerCertificate(error: SslError?): Boolean {
+              val serverUrl = bridge.serverUrl
+                  ?.takeUnless(String::isEmpty) ?: return false
+              val errorUrl = error?.url
+                  ?.takeUnless(String::isEmpty) ?: return false
+
+              val serverUri = Uri.parse(serverUrl)
+              if (!serverUri.scheme.equals("https", ignoreCase = true)) {
+                  return false
+              }
+
+              val errorUri = Uri.parse(errorUrl)
+              return serverUri.host.equals(errorUri.host, ignoreCase = true) &&
+                  normalizePort(serverUri) == normalizePort(errorUri)
+          }
+
+          private fun normalizePort(uri: Uri): Int =
+              uri.port.takeUnless { it == -1 }
+                  ?: when (uri.scheme?.lowercase()) {
+                      "https" -> 443
+                      "http" -> 80
+                      else -> -1
+                  }
+      }
   }
