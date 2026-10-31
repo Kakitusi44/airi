@@ -40,8 +40,8 @@ package ai.moeru.airi_pocket
       fun startOverlay(call: PluginCall) {
           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
   !Settings.canDrawOverlays(context)) {
-              call.reject("NO_PERMISSION", "Нет разрешения. Вызови requestPermission()
-  сначала.")
+              call.reject("NO_PERMISSION", "No permission. Call requestPermission()
+  first.")
               return
           }
           val url = call.getString("url") ?: "https://airi.moeru.ai"
