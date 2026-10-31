@@ -81,6 +81,7 @@ package ai.moeru.airi_pocket
               loadUrl(url)
           }
 
+          // Semi-transparent strip at top — drag it to move the overlay window
           val dragHandle = View(this).apply {
               setBackgroundColor(Color.argb(80, 0, 0, 0))
           }
@@ -141,14 +142,15 @@ package ai.moeru.airi_pocket
               PendingIntent.FLAG_IMMUTABLE
           )
           return NotificationCompat.Builder(this, CHANNEL_ID)
-              .setContentTitle("AIRI активна")
-              .setContentText("Персонаж отображается поверх других приложений")
+              .setContentTitle("AIRI is active")
+              .setContentText("Character is displayed over other apps")
               .setSmallIcon(android.R.drawable.ic_dialog_info)
               .setPriority(NotificationCompat.PRIORITY_LOW)
               .setOngoing(true)
-              .addAction(0, "Скрыть", stopIntent)
+              .addAction(0, "Hide", stopIntent)
               .build()
       }
 
       private fun dpToPx(dp: Int): Int =
           (dp * resources.displayMetrics.density).toInt()
+  }
